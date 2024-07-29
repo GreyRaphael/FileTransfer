@@ -1,5 +1,4 @@
 from multiprocessing.shared_memory import SharedMemory
-import struct
 import time
 import argparse
 import os
@@ -7,32 +6,11 @@ import shutil
 from zipfile import ZipFile
 
 
-LENGTH_TYPE = "i"
-HEADER_SIZE = struct.calcsize(LENGTH_TYPE)
-
-DATA_IS_READ = struct.pack(LENGTH_TYPE, 0)
-DATE_EOF = struct.pack(LENGTH_TYPE, -1)
-
-DATA_SIZE = 10 * 1024 * 1024  # 10 MB
-SEG_SIZE = HEADER_SIZE + DATA_SIZE
-
-
 def file2shm(infile: str):
-    shm = SharedMemory(name="shm_test", create=True, size=SEG_SIZE)
     with open(infile, "rb") as file:
-        while True:
-            data = file.read(DATA_SIZE)
-            real_len = len(data)
-            if real_len == 0:
-                break
-
-            shm.buf[:HEADER_SIZE] = struct.pack(LENGTH_TYPE, real_len)
-            shm.buf[HEADER_SIZE : HEADER_SIZE + real_len] = data
-            print("reading")
-            while shm.buf[:HEADER_SIZE] != DATA_IS_READ:
-                time.sleep(1)
-                print("waiting")
-    shm.buf[:HEADER_SIZE] = DATE_EOF
+        data = file.read()  # read all
+        shm = SharedMemory(name="shm_test", create=True, size=len(data))
+        shm.buf[:] = data
 
     try:
         while True:
@@ -45,15 +23,9 @@ def file2shm(infile: str):
 
 
 def shm2file(outfile: str):
-    shm = SharedMemory(name="shm_test", create=False, size=SEG_SIZE)
+    shm = SharedMemory(name="shm_test", create=False)
     with open(outfile, "wb") as file:
-        while shm.buf[:HEADER_SIZE] != DATE_EOF:
-            if shm.buf[:HEADER_SIZE] != DATA_IS_READ:
-                real_len = struct.unpack(LENGTH_TYPE, shm.buf[:HEADER_SIZE])[0]
-                file.write(shm.buf[HEADER_SIZE : HEADER_SIZE + real_len])
-                shm.buf[:HEADER_SIZE] = DATA_IS_READ
-            else:
-                time.sleep(0.1)
+        file.write(shm.buf[:])
     print("write to", outfile)
     shm.close()
 
