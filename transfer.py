@@ -1,4 +1,5 @@
 from multiprocessing.shared_memory import SharedMemory
+import multiprocessing.resource_tracker as rt
 import struct
 import time
 import argparse
@@ -56,6 +57,7 @@ def shm2file(outfile: str):
                 time.sleep(0.1)
     print("write to", outfile)
     shm.close()
+    rt.unregister("/shm_test", "shared_memory")
 
 
 def process(args):
