@@ -65,11 +65,12 @@ def process(args):
         os.remove("tmp.zip")
     elif args.command == "w":
         if os.path.isfile(args.input):
-            ZipFile("tmp.zip", mode="w").write(args.input)  # without compression
+            lastname = os.path.basename(args.input)
+            ZipFile("tmp.zip", mode="w").write(args.input, arcname=lastname)  # without compression
             file2shm("tmp.zip")
             os.remove("tmp.zip")
         elif os.path.isdir(args.input):
-            shutil.make_archive("tmp", format="zip", root_dir=args.input)
+            shutil.make_archive("tmp", format="zip", root_dir=os.path.dirname(args.input), base_dir=os.path.basename(args.input))
             file2shm("tmp.zip")
             os.remove("tmp.zip")
         else:
