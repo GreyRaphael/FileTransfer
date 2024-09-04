@@ -41,7 +41,6 @@ def file2shm(infile: str):
     finally:
         shm.close()
         shm.unlink()
-        os.remove(infile)
 
 
 def shm2file(outfile: str):
@@ -54,24 +53,25 @@ def shm2file(outfile: str):
                 shm.buf[:HEADER_SIZE] = DATA_IS_READ
             else:
                 time.sleep(0.1)
-    print("write to", outfile)
     shm.close()
 
 
 def process(args):
     if args.command == "r":
-        if os.path.isdir(args.out):
-            outfile = f"{args.out}/output.zip"
-            shm2file(outfile)
-        else:
-            print("-o must specifiy a directory")
+        shm2file("tmp.zip")
+        # unzip & rm tmp.zip
+        ZipFile("tmp.zip", mode="r").extractall("output")
+        print("finish shm->output")
+        os.remove("tmp.zip")
     elif args.command == "w":
         if os.path.isfile(args.input):
             ZipFile("tmp.zip", mode="w").write(args.input)  # without compression
             file2shm("tmp.zip")
+            os.remove("tmp.zip")
         elif os.path.isdir(args.input):
             shutil.make_archive("tmp", format="zip", root_dir=args.input)
             file2shm("tmp.zip")
+            os.remove("tmp.zip")
         else:
             print("-i must specify filename or dirname")
 
@@ -80,11 +80,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="transfer file by sharing memory")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    parser_w = subparsers.add_parser("w", help="writer, file to shm, run first")
+    parser_w = subparsers.add_parser("w", help="writer, file to shm, [run first]")
     parser_w.add_argument("-i", dest="input", type=str, required=True, help="the input singlefile or directory")
 
-    parser_r = subparsers.add_parser("r", help="reader, shm to file, run second")
-    parser_r.add_argument("-o", dest="out", type=str, default=".", help="output directory")
+    parser_r = subparsers.add_parser("r", help="reader, shm to file, current dir, [run second]")
 
     args = parser.parse_args()
     process(args)
