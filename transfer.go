@@ -12,11 +12,18 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const (
+	shmName     = "my_shm"
+	headerSize  = 8
+	outDir      = "output"
+	tmpFileName = "tmp.tar"
+	outFileName = "new_tmp.tar"
+)
+
 func main() {
 	// Ensure at least one argument is provided (the subcommand)
 	if len(os.Args) < 2 {
-		fmt.Println("expected 'w' (writer) or 'r' (reader) subcommand")
-		os.Exit(1)
+		log.Fatal("Usage: <w|r> [-i <input_file_or_directory>]")
 	}
 
 	// Switch on the first argument (the subcommand)
@@ -43,124 +50,119 @@ func main() {
 		processReader()
 
 	default:
-		fmt.Println("expected 'w' (writer) or 'r' (reader) subcommand")
-		os.Exit(1)
+		log.Fatal("Invalid subcommand. Use 'w' (writer) or 'r' (reader).")
 	}
 }
-
-const shmName = "my_shm"
 
 func processWriter(path string) {
 	// Implementation for writer: transfer file to shared memory, etc.
-	info, _ := os.Stat(path)
-	if info.IsDir() {
-		log.Println("Writer processing directory: ", path)
-	} else {
-		log.Println("Writer processing single file: ", path)
+	info, err := os.Stat(path)
+	if err != nil {
+		log.Fatalf("Failed to access input path: %v", err)
 	}
+	log.Printf("Processing %s: %s\n", map[bool]string{true: "directory", false: "file"}[info.IsDir()], path)
 
 	// archive file or directory to tmp.tar
-	tmpFile := "tmp.tar"
-	if err := archiver.Archive([]string{path}, tmpFile); err != nil {
+	if err := archiver.Archive([]string{path}, tmpFileName); err != nil {
 		log.Fatal("Archive error:", err)
 	}
 	// tmp.tar to shm
-	data, _ := os.ReadFile(tmpFile)
+	data, _ := os.ReadFile(tmpFileName)
 	dataSize := uint64(len(data))
-	totalSize := dataSize + 8 // extra 8 bytes to store file size header
+	totalSize := dataSize + headerSize // extra 8 bytes to store file size header
 
-	// Create the file mapping.
-	hMap, err := windows.CreateFileMapping(
-		windows.InvalidHandle, // use system paging file
-		nil,
-		windows.PAGE_READWRITE,
-		uint32(totalSize>>32),
-		uint32(totalSize&0xffffffff),
-		windows.StringToUTF16Ptr(shmName),
-	)
+	hMap, addr, err := createSharedMemory(totalSize)
 	if err != nil {
-		log.Fatal("CreateFileMapping failed:", err)
+		log.Fatalf("Shared memory error: %v", err)
 	}
-	defer windows.CloseHandle(hMap)
+	defer cleanupSharedMemory(hMap, addr)
 
-	// Map the view of the file mapping.
-	addr, err := windows.MapViewOfFile(hMap, windows.FILE_MAP_WRITE, 0, 0, uintptr(totalSize))
-	if err != nil {
-		log.Fatal("MapViewOfFile failed:", err)
-	}
-	defer windows.UnmapViewOfFile(addr)
-
-	// Create a byte slice backed by the shared memory.
 	mem := unsafe.Slice((*byte)(unsafe.Pointer(addr)), totalSize)
+	binary.LittleEndian.PutUint64(mem[:headerSize], dataSize)
+	copy(mem[headerSize:], data)
 
-	// Write the file size into the first 8 bytes (little-endian).
-	binary.LittleEndian.PutUint64(mem[:8], dataSize)
-
-	// Copy the file data into shared memory after the header.
-	copy(mem[8:], data)
-
-	log.Println("Data copied to shared memory: ", shmName)
-	log.Println("Keep this program running until another side has finished reading the data.")
+	log.Printf("Data copied to shared memory: %s\n", shmName)
+	log.Println("Keep this program running until the reader has finished.")
 	log.Println("Press Enter to exit...")
-	fmt.Scanln() // wait for user input before exiting
-	os.Remove(tmpFile)
+	fmt.Scanln()
 
+	os.Remove(tmpFileName)
+}
+
+func createSharedMemory(size uint64) (windows.Handle, uintptr, error) {
+	hMap, err := windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE,
+		uint32(size>>32), uint32(size&0xffffffff), windows.StringToUTF16Ptr(shmName))
+	if err != nil {
+		return 0, 0, fmt.Errorf("CreateFileMapping failed: %w", err)
+	}
+
+	addr, err := windows.MapViewOfFile(hMap, windows.FILE_MAP_WRITE, 0, 0, uintptr(size))
+	if err != nil {
+		windows.CloseHandle(hMap)
+		return 0, 0, fmt.Errorf("MapViewOfFile failed: %w", err)
+	}
+
+	return hMap, addr, nil
+}
+
+func cleanupSharedMemory(hMap windows.Handle, addr uintptr) {
+	windows.UnmapViewOfFile(addr)
+	windows.CloseHandle(hMap)
 }
 
 func processReader() {
-	// Implementation for reader: transfer from shared memory to file, etc.
-	log.Println("Reader read from shared memory: ", shmName)
-	// open shared memory
-	hMap, err := OpenFileMapping(shmName)
-	if err != nil {
-		log.Fatal("OpenFileMapping failed:", err)
-	}
-	defer windows.CloseHandle(hMap)
+	log.Printf("Reading from shared memory: %s\n", shmName)
 
-	// Map header to read file size
-	const headerSize = 8
-	addr, err := windows.MapViewOfFile(hMap, windows.FILE_MAP_READ, 0, 0, headerSize)
+	hMap, addr, fileSize, err := openSharedMemory()
 	if err != nil {
-		log.Fatal("MapViewOfFile (header) failed:", err)
+		log.Fatalf("Failed to read shared memory: %v", err)
 	}
-	fileSize := *(*uint64)(unsafe.Pointer(addr))
-	windows.UnmapViewOfFile(addr)
+	defer cleanupSharedMemory(hMap, addr)
 
-	// Map entire region including data
-	totalSize := uintptr(fileSize) + headerSize
-	addr, err = windows.MapViewOfFile(hMap, windows.FILE_MAP_READ, 0, 0, totalSize)
-	if err != nil {
-		log.Fatal("MapViewOfFile (full) failed:", err)
-	}
-	defer windows.UnmapViewOfFile(addr)
-
-	// Access file data directly after header
 	fileData := unsafe.Slice((*byte)(unsafe.Pointer(addr+headerSize)), fileSize)
+	if err := os.WriteFile(outFileName, fileData, 0644); err != nil {
+		log.Fatalf("Failed to write extracted archive: %v", err)
+	}
 
-	// Write to output file
-	outFile := "new_tmp.tar"
-	if err := os.WriteFile(outFile, fileData, 0644); err != nil {
-		log.Fatal("Failed to write new_tmp.tar:", err)
-	}
-	// Unarchive outFile into the "output" directory
 	unzipArchiver := archiver.Tar{OverwriteExisting: true}
-	err = unzipArchiver.Unarchive(outFile, "output")
-	if err != nil {
-		log.Fatal("Error unzipping file:", err)
+	if err := unzipArchiver.Unarchive(outFileName, outDir); err != nil {
+		log.Fatalf("Error extracting archive: %v", err)
 	}
-	os.Remove(outFile)
-	log.Println("Successfully shm & unzipped into ouput")
+
+	os.Remove(outFileName)
+	log.Printf("Successfully extracted to '%s'\n", outDir)
 }
 
 // OpenFileMapping wraps the Windows API OpenFileMappingW call.
 func OpenFileMapping(name string) (windows.Handle, error) {
 	proc := windows.NewLazySystemDLL("kernel32.dll").NewProc("OpenFileMappingW")
-
-	ptr := windows.StringToUTF16Ptr(name)
-
-	r, _, err := proc.Call(windows.FILE_MAP_READ, 0, uintptr(unsafe.Pointer(ptr)))
+	r, _, err := proc.Call(windows.FILE_MAP_READ, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(name))))
 	if r == 0 {
 		return 0, fmt.Errorf("OpenFileMappingW failed: %w", err)
 	}
 	return windows.Handle(r), nil
+}
+
+func openSharedMemory() (windows.Handle, uintptr, uint64, error) {
+	hMap, err := OpenFileMapping(shmName)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("OpenFileMapping failed: %w", err)
+	}
+
+	addr, err := windows.MapViewOfFile(hMap, windows.FILE_MAP_READ, 0, 0, headerSize)
+	if err != nil {
+		windows.CloseHandle(hMap)
+		return 0, 0, 0, fmt.Errorf("MapViewOfFile (header) failed: %w", err)
+	}
+
+	fileSize := binary.LittleEndian.Uint64(unsafe.Slice((*byte)(unsafe.Pointer(addr)), headerSize))
+	windows.UnmapViewOfFile(addr)
+
+	addr, err = windows.MapViewOfFile(hMap, windows.FILE_MAP_READ, 0, 0, uintptr(fileSize+headerSize))
+	if err != nil {
+		windows.CloseHandle(hMap)
+		return 0, 0, 0, fmt.Errorf("MapViewOfFile (full) failed: %w", err)
+	}
+
+	return hMap, addr, fileSize, nil
 }
