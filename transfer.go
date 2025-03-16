@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/mholt/archiver/v3"
 )
 
 func main() {
@@ -42,9 +44,12 @@ func main() {
 	}
 }
 
-func processWriter(input string) {
+func processWriter(path string) {
 	// Implementation for writer: transfer file to shared memory, etc.
-	fmt.Println("Writer processing file/directory:", input)
+	fmt.Println("Writer processing file/directory:", path)
+	if err := archiver.Archive([]string{path}, "tmp.zip"); err != nil {
+		fmt.Println("Archive error:", err)
+	}
 }
 
 func processReader() {
